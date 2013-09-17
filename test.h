@@ -15,10 +15,11 @@ struct thread_args {
     int critical_section;	// Time spent inside critical section
     int outside_section;	// Time spent outside critical section
     pthread_mutex_t *lock;	// Use this lock to notify of start. 
-    uint64_t *start_times;	// Array of start times
-    uint64_t *end_times;	// Array of end times
+    uint64_t **start_times;	// Array of start times
+    uint64_t **end_times;	// Array of end times
     int num_threads;		// The number of threads in experiment. 
-    cpu_set_t* cpu_mask;	// 
+    cpu_set_t* cpu_mask;	// The CPU to which to bind. 
+    int num_runs;		// Number of times to run experiment. 
 } __attribute__ ((aligned(128)));
 
 // Layout the fields on separate cache lines. 
@@ -55,7 +56,8 @@ do_experiment(int alloc_policy,
               int outside_len, 
               int num_threads,
               int iterations,
-              int experiment);
+              int experiment,
+              int num_runs);
 
 void*
 per_replicated_thread_function(void *thread_args);

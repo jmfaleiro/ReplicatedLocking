@@ -7,13 +7,14 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <sched.h>
+#include <limits.h>
 
 #include "util.h"
 #include "test.h"
 #include "cpuinfo.h"
 
 pthread_mutex_t experiment_lock = PTHREAD_MUTEX_INITIALIZER;
-volatile struct start_struct start;
+volatile struct start_struct *start;
 
 int
 increment_ready_counter(volatile uint64_t *counter, 
@@ -24,6 +25,7 @@ increment_ready_counter(volatile uint64_t *counter,
     // If true, all threads are ready to go. Signal them by writing a 1 
     // to the start_flag. 
     if (counter_value == num_threads) {
+        xchgq(counter, 0);
         xchgq(flag, 1);
         return 1;
     }
@@ -51,7 +53,8 @@ arg_error()
             "-o time spent outside the critical section\n"
             "-n number of threads\n"
             "-i number of iterations in the program\n"
-            "-e type of lock to use\n");
+            "-e type of lock to use\n"
+            "-r number of times to run the experiment\n");
 
     exit(-1);
 }
@@ -66,16 +69,52 @@ warmup_counter()
     }
 }
 
+// Assumes that all the values in the array are non-zero. 
+int
+find_min(int size,
+         uint64_t *values)
+{
+    uint64_t min_value = ULONG_MAX;
+    uint64_t min_index = -1;
+    int i;
+    for (i = 0; i < size; ++i) 
+        if (values[i] < min_value) {
+            min_value = values[i];
+            min_index = i;
+        }
+    return min_index;
+}
+
+// Assumes that all the values in the array are non-zero. 
+int
+find_max(int size,
+         uint64_t *values)
+{
+    uint64_t max_value = 0;
+    int max_index = -1;
+    int i;
+    for (i = 0; i < size; ++i) 
+        if (values[i] >  max_value) {
+            max_value = values[i];
+            max_index = i;
+        }
+    return max_index;
+}
+
 void
 do_output(int num_threads,
-          uint64_t *start_times,
-          uint64_t *end_times) 
+          int num_runs,
+          uint64_t **start_times,
+          uint64_t **end_times) 
 {    
+    uint64_t times[num_runs];
     int i;
     fprintf(stdout, "thread times:\n");
-    for (i = 0; i < num_threads; ++i) {
-        fprintf(stdout, "Thread %d start: %lu\n", i, start_times[i]);
-        fprintf(stdout, "Thread %d end: %lu\n", i, end_times[i]);
+    for (i = 0; i < num_runs; ++i) {
+        int start_index = find_min(num_threads, start_times[i]);
+        int end_index = find_max(num_threads, end_times[i]);
+        times[i] = end_times[i][end_index] - start_times[i][start_index];
+        fprintf(stdout, "run %d: %lu\n", i, times[i]);
     }
 }
 
@@ -85,7 +124,8 @@ do_experiment(int alloc_policy,
               int outside_len, 
               int num_threads,
               int iterations,
-              int experiment)
+              int experiment,
+              int num_runs)
 {
     cpu_set_t cpu_alloc[num_threads];
 
@@ -100,9 +140,28 @@ do_experiment(int alloc_policy,
         CPU_SET(cpu_number, &cpu_alloc[i]);
     }
 
+    // Initialize the set of start_structs to coordinate each run of 
+    // the experiment.
+    start = 
+        (struct start_struct *)malloc(sizeof(struct start_struct) * num_runs);
+    memset((void *)start, 0, sizeof(struct start_struct) * num_runs);
+
     // Output arrays for start and end times of each thread. 
-    uint64_t *start_times = (uint64_t *)malloc(sizeof(uint64_t) * num_threads);
-    uint64_t *end_times = (uint64_t *)malloc(sizeof(uint64_t) * num_threads);
+    uint64_t **start_times = 
+        (uint64_t **)malloc(sizeof(uint64_t*) * num_runs);
+    uint64_t **end_times = 
+        (uint64_t **)malloc(sizeof(uint64_t*) * num_runs);
+
+    for (i = 0; i < num_runs; ++i) {
+        start_times[i] = (uint64_t *)malloc(sizeof(uint64_t) * num_threads);
+        end_times[i] = (uint64_t *)malloc(sizeof(uint64_t) * num_threads);
+        
+        int j;
+        for (j = 0; j < num_threads; ++j) {
+            start_times[i][j] = 0;
+            end_times[i][j] = 0;
+        }
+    }
     
     // Allocate an array of thread arguments, one element for each thread, and
     // initialize each argument.
@@ -117,16 +176,15 @@ do_experiment(int alloc_policy,
         args[i].lock = &experiment_lock;
         args[i].start_times = start_times;
         args[i].end_times = end_times;
+        args[i].num_runs = num_runs;
         args[i].num_threads = num_threads;
     }
     
     void *(*thread_function)(void *);
-    if (experiment == 0) {
+    if (experiment == 0) 
         thread_function = per_thread_function;
-    }
-    else {
+    else 
         thread_function = per_replicated_thread_function;
-    }
 
     // Allocate and run worker threads.
     pthread_t worker_threads[num_threads];
@@ -140,7 +198,7 @@ do_experiment(int alloc_policy,
     for (i = 0; i < num_threads; ++i) 
         pthread_join(worker_threads[i], NULL);
     
-    do_output(num_threads, start_times, end_times);
+    do_output(num_threads, num_runs, start_times, end_times);
 }
 
 void
@@ -162,31 +220,37 @@ per_thread_function(void *thread_args)
     int iterations = args->iterations;
     int cs_len = args->critical_section;
     pthread_mutex_t *mutex = args->lock;
-    
-    // Signal that this thread is ready to go, then wait for other threads
-    // to get ready. 
-    if (increment_ready_counter(&start.num_ready, 
-                                &start.start_flag, 
-                                args->num_threads) == 0) 
-        wait_for_flag(&start.start_flag);
+    int num_runs = args->num_runs;
 
-    // Do the actual experiment. 
-    uint64_t start_time = rdtsc();
-    do_pthread(args->lock, 
-               iterations, 
-               args->critical_section,
-               args->outside_section);
-    uint64_t end_time = rdtsc();
+    int i;
+    for (i = 0; i < num_runs; ++i) {    
     
-    // Wait for everyone to finish. 
-    if (increment_ready_counter(&start.num_done, 
-                                &start.done_flag, 
-                                args->num_threads) == 0) 
-        wait_for_flag(&start.done_flag);
+        // Signal that this thread is ready to go, then wait for other threads
+        // to get ready. 
+        if (increment_ready_counter(&(start[i]).num_ready, 
+                                    &(start[i]).start_flag, 
+                                    args->num_threads) == 0) 
+            wait_for_flag(&(start[i]).start_flag);
+
+        // Do the actual experiment. 
+        uint64_t start_time = rdtsc();
+        do_pthread(args->lock, 
+                   iterations, 
+                   args->critical_section,
+                   args->outside_section);
+        uint64_t end_time = rdtsc();
     
-    // We don't care if threads step on each other here (performance wise).
-    (args->start_times)[args->index] = start_time;
-    (args->end_times)[args->index] = end_time;
+        // Wait for everyone to finish. 
+        if (increment_ready_counter(&(start[i]).num_done, 
+                                    &(start[i]).done_flag, 
+                                    args->num_threads) == 0) 
+            wait_for_flag(&(start[i]).done_flag);
+
+    
+        // We don't care if threads step on each other here (performance wise).
+        (args->start_times)[i][args->index] = start_time;
+        (args->end_times)[i][args->index] = end_time;
+    }
     return args;
 }
 
@@ -199,36 +263,42 @@ per_replicated_thread_function(void *thread_args)
     int iterations = args->iterations;
     int cs_len = args->critical_section;
     int out_len = args->outside_section;
+    int num_runs = args->num_runs;
     
     // Allocate and initialize an array of queue_structs. 
-    int i;    
+    int i, j;  
     struct queue_struct *cs_args = 
         (struct queue_struct *)malloc(sizeof(struct queue_struct) * iterations);
-    for (i = 0; i < iterations; ++i) {
-        cs_args[i].prev = NULL;
-    }        
 
-    // Signal that this thread is ready to go, then wait for other threads
-    // to get ready. 
-    if (increment_ready_counter(&start.num_ready, 
-                                &start.start_flag, 
-                                args->num_threads) == 0) 
-        wait_for_flag(&start.start_flag);
+    for (j = 0; j < num_runs; ++j) {
 
+        for (i = 0; i < iterations; ++i) {
+            cs_args[i].prev = NULL;
+        }        
 
-    uint64_t start_time = rdtsc();
-    do_replicated(cs_args, iterations, cs_len, out_len);
-    uint64_t end_time = rdtsc();
+        // Signal that this thread is ready to go, then wait for other threads
+        // to get ready. 
+        if (increment_ready_counter(&(start[j]).num_ready, 
+                                    &(start[j]).start_flag, 
+                                    args->num_threads) == 0) {
+            wait_for_flag(&(start[j]).start_flag);
+        }
+
+        uint64_t start_time = rdtsc();
+        do_replicated(cs_args, iterations, cs_len, out_len);
+        uint64_t end_time = rdtsc();
     
-    // Wait for everyone to finish.
-    if (increment_ready_counter(&start.num_done,
-                                &start.done_flag,
-                                args->num_threads) == 0)
-        wait_for_flag(&start.done_flag);
-    
-    // We don't care if threads step on each other here (performance wise).
-    (args->start_times)[args->index] = start_time;
-    (args->end_times)[args->index] = end_time;
+        // Wait for everyone to finish.
+        if (increment_ready_counter(&(start[j]).num_done,
+                                    &(start[j]).done_flag,
+                                    args->num_threads) == 0) {
+            wait_for_flag(&(start[j]).done_flag);
+        }    
+     
+        // We don't care if threads step on each other here (performance wise).
+        (args->start_times)[j][args->index] = start_time;
+        (args->end_times)[j][args->index] = end_time;
+    }
     return args;    
 }
 
@@ -298,7 +368,7 @@ int
 main(int argc, char **argv) 
 {
     init_cpuinfo();
-    char *argstring = "a:c:o:n:i:e:";        
+    char *argstring = "a:c:o:n:i:e:r:";        
 
     int alloc_policy = -1;
     int cs_len = -1;
@@ -306,10 +376,16 @@ main(int argc, char **argv)
     int num_threads = -1;
     int iterations = -1;    
     int experiment = -1;
+    int runs = -1;
 
     int c;
     while ((c = getopt(argc, argv, argstring)) != -1) {
         switch (c) {
+        case 'r':
+            if (runs != -1)
+                arg_error();
+            runs = atoi(optarg);
+            break;
         case 'a':
             if (alloc_policy != -1)
                 arg_error();
@@ -359,6 +435,7 @@ main(int argc, char **argv)
                   outside_len, 
                   num_threads, 
                   iterations,
-                  experiment);
+                  experiment,
+                  runs);
     return 0;
 }
