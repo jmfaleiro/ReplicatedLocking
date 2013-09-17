@@ -6,6 +6,8 @@
 #include <pthread.h>
 #include <numa.h>
 
+#include "queue_lock.h"
+
 // Align each arg to a cache line
 struct thread_args {
     int index;			// "Index" of this node in time arrays (below).
@@ -27,13 +29,8 @@ struct start_struct {
     volatile uint64_t done_flag;
 };
 
-
-struct queue_struct {
-    volatile struct queue_struct *next;
-} __attribute__ ((aligned(128)));
-
 void
-do_replicated(volatile struct queue_struct **next,
+do_replicated(struct queue_struct *next,
               struct queue_struct *cs_args, 
               int iterations, 
               int cs_time, 

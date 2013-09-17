@@ -14,7 +14,6 @@
 
 pthread_mutex_t experiment_lock = PTHREAD_MUTEX_INITIALIZER;
 volatile struct start_struct start;
-volatile struct queue_struct *tail = NULL;
 
 int
 increment_ready_counter(volatile uint64_t *counter, 
@@ -206,11 +205,8 @@ per_replicated_thread_function(void *thread_args)
     struct queue_struct *cs_args = 
         (struct queue_struct *)malloc(sizeof(struct queue_struct) * iterations);
     for (i = 0; i < iterations; ++i) {
-        cs_args[i].next = NULL;
+        cs_args[i].prev = NULL;
     }        
-    
-    // Initialize the pointer from which we're going to start. 
-    volatile struct queue_struct **start_struct = &tail;
 
     // Signal that this thread is ready to go, then wait for other threads
     // to get ready. 
@@ -221,7 +217,7 @@ per_replicated_thread_function(void *thread_args)
 
 
     uint64_t start_time = rdtsc();
-    do_replicated(start_struct, cs_args, iterations, cs_len, out_len);
+    do_replicated(NULL, cs_args, iterations, cs_len, out_len);
     uint64_t end_time = rdtsc();
     
     // Wait for everyone to finish.
@@ -236,8 +232,23 @@ per_replicated_thread_function(void *thread_args)
     return args;    
 }
 
+// Do all pending work before processing cur. 
 void
-do_replicated(volatile struct queue_struct **next,
+process_recursive(struct queue_struct *last, 
+                  struct queue_struct *cur,
+                  int cs_time)
+{
+    if (last == cur) {
+        return;
+    }
+    else {
+        process_recursive(last, cur->prev, cs_time);
+        do_work(cs_time);
+    }
+}
+
+inline void
+do_replicated(struct queue_struct *last,
               struct queue_struct *cs_args, 
               int iterations, 
               int cs_time, 
@@ -248,32 +259,12 @@ do_replicated(volatile struct queue_struct **next,
 
         // Create a new argument struct and enqueue it.
         struct queue_struct *cur = &cs_args[i];
-
-
-        // XXX: We need the following two operations to be atomic, otherwise 
-        // we could get pre-empted in between. 
-        struct queue_struct *prev = 
-            (struct queue_struct *)xchgq((uint64_t *)&tail,                 
-                                         (uint64_t)cur);
-        if (prev != NULL)
-            prev->next = cur;
-
-        while (*next == NULL)
-            ;
+        enqueue(cur);
         
-        // First perform any pending work. 
-        while (*next != cur) {
-            do_work(cs_time);
-            next = (volatile struct queue_struct **)&((*next)->next);
-            while (*next == NULL)
-                ;
-        }
-        
-        // Then execute the current request.
-        do_work(cs_time);
-        next = (volatile struct queue_struct **)&((*next)->next);
-        
-        // Spin outside the critical section. 
+        // Recursively perform all pending work, including the just enqueued
+        // critical section.
+        process_recursive(last, cur, cs_time);
+        last = cur;
         do_work(out_time);
     }
 }
