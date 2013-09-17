@@ -27,6 +27,11 @@ struct start_struct {
     volatile uint64_t done_flag;
 };
 
+
+struct queue_struct {
+    struct queue_struct *next;
+} __attribute__ ((aligned(128)));
+
 int
 increment_ready_counter(volatile uint64_t *counter, 
                         volatile uint64_t *flag,

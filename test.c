@@ -14,6 +14,7 @@
 
 pthread_mutex_t experiment_lock = PTHREAD_MUTEX_INITIALIZER;
 volatile struct start_struct start;
+volatile struct queue_struct *tail = NULL;
 
 int
 increment_ready_counter(volatile uint64_t *counter, 
@@ -33,7 +34,7 @@ increment_ready_counter(volatile uint64_t *counter,
 }
 
 // Wait for someone to signal the start flag. Avoid using pthread mechanisms
-// to signal to avoid any scheduler overhead. 
+// to signal to avoid any library/kernel overhead. 
 void
 wait_for_flag(volatile uint64_t *flag)
 {
@@ -69,7 +70,7 @@ void
 do_output(int num_threads,
           uint64_t *start_times,
           uint64_t *end_times) 
-{
+{    
     int i;
     fprintf(stdout, "thread times:\n");
     for (i = 0; i < num_threads; ++i) {
@@ -178,6 +179,45 @@ per_thread_function(void *thread_args)
     (args->start_times)[args->index] = start_time;
     (args->end_times)[args->index] = end_time;
     return args;
+}
+
+void
+do_replicated(struct queue_struct **next, 
+              int iterations, 
+              int cs_time, 
+              int out_time)
+{
+    // Allocate and initialize an array of queue_structs.
+    int i;    
+    struct queue_struct *cs_args = 
+        (struct queue_struct *)malloc(sizeof(struct queue_struct) * iterations);
+    for (i = 0; i < iterations; ++i) {
+        cs_args[i].next = NULL;
+    }        
+
+    // Do the actual experiment.
+    for (i = 0; i < iterations; ++i) {
+
+        // Create a new argument struct and enqueue it.
+        struct queue_struct *cur = &cs_args[i];
+        struct queue_struct *prev = 
+            (struct queue_struct *)xchgq((uint64_t *)&tail, 
+                                         (uint64_t)cur);
+        prev->next = cur;
+        
+        // First perform any pending work. 
+        while (*next != cur) {
+            do_work(cs_time);
+            next = &((*next)->next);
+        }
+        
+        // Then execute the current request.
+        do_work(cs_time);
+        next = &((*next)->next);
+        
+        // Spin outside the critical section. 
+        do_work(out_time);
+    }
 }
 
 void
