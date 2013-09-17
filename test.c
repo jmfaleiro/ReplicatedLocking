@@ -51,7 +51,8 @@ arg_error()
             "-c critical section length\n"
             "-o time spent outside the critical section\n"
             "-n number of threads\n"
-            "-i number of iterations in the program\n");
+            "-i number of iterations in the program\n"
+            "-e type of lock to use\n");
 
     exit(-1);
 }
@@ -84,7 +85,8 @@ do_experiment(int alloc_policy,
               int cs_len, 
               int outside_len, 
               int num_threads,
-              int iterations)
+              int iterations,
+              int experiment)
 {
     cpu_set_t cpu_alloc[num_threads];
 
@@ -119,12 +121,20 @@ do_experiment(int alloc_policy,
         args[i].num_threads = num_threads;
     }
     
+    void *(*thread_function)(void *);
+    if (experiment == 0) {
+        thread_function = per_thread_function;
+    }
+    else {
+        thread_function = per_replicated_thread_function;
+    }
+
     // Allocate and run worker threads.
     pthread_t worker_threads[num_threads];
     for (i = 0; i < num_threads; ++i) 
         pthread_create(&worker_threads[i], 
                        NULL, 
-                       per_thread_function, 
+                       thread_function, 
                        (void *)&args[i]);
     
     // Wait for the threads to finish.
@@ -181,39 +191,87 @@ per_thread_function(void *thread_args)
     return args;
 }
 
-void
-do_replicated(struct queue_struct **next, 
-              int iterations, 
-              int cs_time, 
-              int out_time)
+void*
+per_replicated_thread_function(void *thread_args)
 {
-    // Allocate and initialize an array of queue_structs.
+
+    struct thread_args *args = (struct thread_args *)thread_args;
+    pin_thread(args->cpu_mask);
+    int iterations = args->iterations;
+    int cs_len = args->critical_section;
+    int out_len = args->outside_section;
+    
+    // Allocate and initialize an array of queue_structs. 
     int i;    
     struct queue_struct *cs_args = 
         (struct queue_struct *)malloc(sizeof(struct queue_struct) * iterations);
     for (i = 0; i < iterations; ++i) {
         cs_args[i].next = NULL;
     }        
+    
+    // Initialize the pointer from which we're going to start. 
+    volatile struct queue_struct **start_struct = &tail;
 
-    // Do the actual experiment.
+    // Signal that this thread is ready to go, then wait for other threads
+    // to get ready. 
+    if (increment_ready_counter(&start.num_ready, 
+                                &start.start_flag, 
+                                args->num_threads) == 0) 
+        wait_for_flag(&start.start_flag);
+
+
+    uint64_t start_time = rdtsc();
+    do_replicated(start_struct, cs_args, iterations, cs_len, out_len);
+    uint64_t end_time = rdtsc();
+    
+    // Wait for everyone to finish.
+    if (increment_ready_counter(&start.num_done,
+                                &start.done_flag,
+                                args->num_threads) == 0)
+        wait_for_flag(&start.done_flag);
+    
+    // We don't care if threads step on each other here (performance wise).
+    (args->start_times)[args->index] = start_time;
+    (args->end_times)[args->index] = end_time;
+    return args;    
+}
+
+void
+do_replicated(volatile struct queue_struct **next,
+              struct queue_struct *cs_args, 
+              int iterations, 
+              int cs_time, 
+              int out_time)
+{
+    int i;
     for (i = 0; i < iterations; ++i) {
 
         // Create a new argument struct and enqueue it.
         struct queue_struct *cur = &cs_args[i];
+
+
+        // XXX: We need the following two operations to be atomic, otherwise 
+        // we could get pre-empted in between. 
         struct queue_struct *prev = 
-            (struct queue_struct *)xchgq((uint64_t *)&tail, 
+            (struct queue_struct *)xchgq((uint64_t *)&tail,                 
                                          (uint64_t)cur);
-        prev->next = cur;
+        if (prev != NULL)
+            prev->next = cur;
+
+        while (*next == NULL)
+            ;
         
         // First perform any pending work. 
         while (*next != cur) {
             do_work(cs_time);
-            next = &((*next)->next);
+            next = (volatile struct queue_struct **)&((*next)->next);
+            while (*next == NULL)
+                ;
         }
         
         // Then execute the current request.
         do_work(cs_time);
-        next = &((*next)->next);
+        next = (volatile struct queue_struct **)&((*next)->next);
         
         // Spin outside the critical section. 
         do_work(out_time);
@@ -248,13 +306,14 @@ int
 main(int argc, char **argv) 
 {
     init_cpuinfo();
-    char *argstring = "a:c:o:n:i:";        
+    char *argstring = "a:c:o:n:i:e:";        
 
     int alloc_policy = -1;
     int cs_len = -1;
     int outside_len = -1;
     int num_threads = -1;
     int iterations = -1;    
+    int experiment = -1;
 
     int c;
     while ((c = getopt(argc, argv, argstring)) != -1) {
@@ -284,6 +343,11 @@ main(int argc, char **argv)
                 arg_error();
             iterations = atoi(optarg);
             break;
+        case 'e':
+            if (experiment != -1)
+                arg_error();
+            experiment = atoi(optarg);
+            break;
         default:
             arg_error();
         }
@@ -293,10 +357,16 @@ main(int argc, char **argv)
         (cs_len == -1) || 
         (outside_len == -1) ||
         (num_threads == -1) ||
-        (iterations == -1)) {
+        (iterations == -1) ||
+        (experiment == -1)) {
         arg_error();
     }
 
-    do_experiment(alloc_policy, cs_len, outside_len, num_threads, iterations);
+    do_experiment(alloc_policy, 
+                  cs_len, 
+                  outside_len, 
+                  num_threads, 
+                  iterations,
+                  experiment);
     return 0;
 }

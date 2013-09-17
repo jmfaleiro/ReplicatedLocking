@@ -29,8 +29,15 @@ struct start_struct {
 
 
 struct queue_struct {
-    struct queue_struct *next;
+    volatile struct queue_struct *next;
 } __attribute__ ((aligned(128)));
+
+void
+do_replicated(volatile struct queue_struct **next,
+              struct queue_struct *cs_args, 
+              int iterations, 
+              int cs_time, 
+              int out_time);
 
 int
 increment_ready_counter(volatile uint64_t *counter, 
@@ -51,7 +58,11 @@ do_experiment(int alloc_policy,
               int cs_len, 
               int outside_len, 
               int num_threads,
-              int iterations);
+              int iterations,
+              int experiment);
+
+void*
+per_replicated_thread_function(void *thread_args);
 
 void
 pin_thread(cpu_set_t *cpu);
