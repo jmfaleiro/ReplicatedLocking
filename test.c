@@ -234,7 +234,7 @@ per_replicated_thread_function(void *thread_args)
 
 // Do all pending work before processing cur. 
 inline void
-process_recursive(struct queue_struct *last, 
+process_recursive(volatile struct queue_struct *last, 
                   volatile struct queue_struct *cur,
                   int cs_time)
 {
@@ -253,14 +253,15 @@ do_replicated(struct queue_struct *cs_args,
               int cs_time, 
               int out_time)
 {
-    struct queue_struct *last = NULL;
+    volatile struct queue_struct *last = NULL;
     int i;
     for (i = 0; i < iterations; ++i) {
 
         // Create a new argument struct and enqueue it.
-        struct queue_struct *cur = &cs_args[i];
+        volatile struct queue_struct *cur = &cs_args[i];
         enqueue(cur);
-        
+        cur = &cs_args[i];
+
         // Recursively perform all pending work, including the just enqueued
         // critical section.
         process_recursive(last, cur, cs_time);

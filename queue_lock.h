@@ -9,7 +9,7 @@ struct queue_struct {
 static volatile struct queue_struct *tail = NULL;
 
 static inline uint64_t
-cmp_and_swap(struct queue_struct *n, 
+cmp_and_swap(volatile struct queue_struct *n, 
              volatile struct queue_struct *cmp)
 {
     struct queue_struct *out;
@@ -22,7 +22,7 @@ cmp_and_swap(struct queue_struct *n,
 
 
 void
-enqueue(struct queue_struct* next)
+enqueue(volatile struct queue_struct* next)
 {
     while (1) {
         next->prev = tail;
