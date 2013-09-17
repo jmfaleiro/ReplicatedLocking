@@ -12,4 +12,4 @@ cpuinfo.o: cpuinfo.c cpuinfo.h
 	$(CC) -c -g -o $@ cpuinfo.c
 
 clean:
-	rm -rf *.o
+	rm -rf *.o out

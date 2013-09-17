@@ -30,8 +30,7 @@ struct start_struct {
 };
 
 void
-do_replicated(struct queue_struct *next,
-              struct queue_struct *cs_args, 
+do_replicated(struct queue_struct *cs_args, 
               int iterations, 
               int cs_time, 
               int out_time);

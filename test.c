@@ -217,7 +217,7 @@ per_replicated_thread_function(void *thread_args)
 
 
     uint64_t start_time = rdtsc();
-    do_replicated(NULL, cs_args, iterations, cs_len, out_len);
+    do_replicated(cs_args, iterations, cs_len, out_len);
     uint64_t end_time = rdtsc();
     
     // Wait for everyone to finish.
@@ -233,9 +233,9 @@ per_replicated_thread_function(void *thread_args)
 }
 
 // Do all pending work before processing cur. 
-void
+inline void
 process_recursive(struct queue_struct *last, 
-                  struct queue_struct *cur,
+                  volatile struct queue_struct *cur,
                   int cs_time)
 {
     if (last == cur) {
@@ -248,12 +248,12 @@ process_recursive(struct queue_struct *last,
 }
 
 inline void
-do_replicated(struct queue_struct *last,
-              struct queue_struct *cs_args, 
+do_replicated(struct queue_struct *cs_args, 
               int iterations, 
               int cs_time, 
               int out_time)
 {
+    struct queue_struct *last = NULL;
     int i;
     for (i = 0; i < iterations; ++i) {
 
